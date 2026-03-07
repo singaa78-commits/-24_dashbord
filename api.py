@@ -444,60 +444,140 @@ def get_kpi(start_date: Optional[str] = None, end_date: Optional[str] = None):
 
 @app.get("/api/overview-data")
 def get_overview_data(start_date: Optional[str] = None, end_date: Optional[str] = None):
-    """Unified endpoint to return all data for the overview tab in one request"""
+    """Unified endpoint for the overview tab"""
     if not client.access_token:
         return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-    
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        start = start_date or today
-        end = end_date or today
+        from collections import defaultdict, Counter
+        today = datetime.now()
+        ed = end_date or today.strftime("%Y-%m-%d")
+        sd = start_date or today.strftime("%Y-%m-%d")
+        ref_end = parse_order_date(ed + "T23:59:59+09:00") or today
 
-        # Fetch all orders once
-        orders = fetch_all_orders({"start_date": start, "end_date": end})
-        paid_orders = paid_only(orders)
+        orders = fetch_all_orders({"start_date": sd, "end_date": ed})
+        paid = paid_only(orders)
 
-        # 1. Calculate KPIs
-        total_revenue = sum(order_revenue(o) for o in paid_orders)
-        total_orders = len(paid_orders)
-        
-        from collections import Counter
-        buyer_ids = {o.get('member_id') for o in paid_orders if o.get('member_id')}
-        new_customers = sum(1 for o in paid_orders if o.get('first_order') in ('T', True) and o.get('member_id'))
-        
-        buyer_counts = Counter(o.get('member_id') for o in paid_orders if o.get('member_id'))
-        repeat_buyers = sum(1 for cnt in buyer_counts.values() if cnt > 1)
-        repurchase_rate = round((repeat_buyers / len(buyer_counts) * 100), 1) if buyer_counts else 0
+        # ── KPIs ──────────────────────────────────────────────
+        total_revenue = sum(order_revenue(o) for o in paid)
+        total_orders  = len(paid)
+        buyer_ids     = {o.get('member_id') for o in paid if o.get('member_id')}
+        buyer_counts  = Counter(o.get('member_id') for o in paid if o.get('member_id'))
+        repeat_buyers = sum(1 for c in buyer_counts.values() if c > 1)
+
+        new_customers = len({o.get('member_id') for o in paid
+                             if o.get('first_order') in ('T', True) and o.get('member_id')})
+        new_revenue   = sum(order_revenue(o) for o in paid
+                            if o.get('first_order') in ('T', True))
 
         kpi = {
-            "revenue": total_revenue,
-            "orders": total_orders,
-            "new_customers": new_customers,
-            "repurchase_rate": repurchase_rate,
-            "aov": round(total_revenue / total_orders, 0) if total_orders > 0 else 0,
-            "new_customers_ratio": round((new_customers / len(buyer_counts) * 100), 1) if buyer_counts else 0
+            "revenue":            round(total_revenue),
+            "orders":             total_orders,
+            "new_customers":      new_customers,
+            "repurchase_rate":    round(repeat_buyers / len(buyer_counts) * 100, 1) if buyer_counts else 0,
+            "aov":                round(total_revenue / total_orders, 0) if total_orders else 0,
+            "ltv":                round(total_revenue / len(buyer_ids), 0) if buyer_ids else 0,
+            "avg_frequency":      round(total_orders / len(buyer_ids), 2) if buyer_ids else 0,
+            "new_revenue":        round(new_revenue),
+            "new_revenue_ratio":  round(new_revenue / total_revenue * 100, 1) if total_revenue else 0,
+            "new_customers_ratio": round(new_customers / len(buyer_ids) * 100, 1) if buyer_ids else 0,
         }
 
-        # 2. Calculate Seasonal Trend
-        monthly_rev = Counter()
-        monthly_ord = Counter()
-        for o in paid_orders:
-            d_str = o.get('order_date', '')[:10]
-            if not d_str: continue
-            m = datetime.fromisoformat(d_str).month
-            monthly_rev[m] += order_revenue(o)
-            monthly_ord[m] += 1
-        
-        m_trend = []
-        for i in range(1, 13):
-            if i in monthly_rev or i in monthly_ord:
-                m_trend.append({"month": f"{i}월", "revenue": monthly_rev[i], "orders": monthly_ord[i]})
+        # ── 트렌드 (일별/주별/월별) ───────────────────────────
+        daily_map   = defaultdict(lambda: {"revenue": 0.0, "orders": 0})
+        weekly_map  = defaultdict(lambda: {"revenue": 0.0, "orders": 0})
+        monthly_map = defaultdict(lambda: {"revenue": 0.0, "orders": 0})
+        monthly_new    = defaultdict(set)
+        monthly_repeat = defaultdict(set)
+        cust_dates  = defaultdict(list)
+
+        for o in paid:
+            d = parse_order_date(o.get('order_date', ''))
+            if not d: continue
+            amt = order_revenue(o)
+            mid = o.get('member_id', '')
+
+            day_k   = d.strftime("%Y-%m-%d")
+            iso     = d.isocalendar()
+            week_k  = f"{iso[0]}-W{iso[1]:02d}"
+            month_k = d.strftime("%Y-%m")
+
+            daily_map[day_k]["revenue"]   += amt
+            daily_map[day_k]["orders"]    += 1
+            weekly_map[week_k]["revenue"] += amt
+            weekly_map[week_k]["orders"]  += 1
+            monthly_map[month_k]["revenue"] += amt
+            monthly_map[month_k]["orders"]  += 1
+
+            if mid:
+                cust_dates[mid].append(d)
+                if o.get('first_order') in ('T', True):
+                    monthly_new[month_k].add(mid)
+                else:
+                    monthly_repeat[month_k].add(mid)
+
+        def trend_list(m, label_fn):
+            return [{"date": k, "label": label_fn(k), "revenue": round(v["revenue"]), "orders": v["orders"]}
+                    for k, v in sorted(m.items())]
+
+        daily_trend   = trend_list(daily_map,   lambda k: k[5:])
+        weekly_trend  = trend_list(weekly_map,  lambda k: k)
+        monthly_trend = trend_list(monthly_map, lambda k: k[5:] + "월")
+
+        # ── 신규 vs 재구매 월별 ───────────────────────────────
+        all_months  = sorted(set(list(monthly_new) + list(monthly_repeat)))
+        new_vs_repeat = []
+        for m in all_months:
+            nc = len(monthly_new[m]); rc = len(monthly_repeat[m]); tc = nc + rc
+            new_vs_repeat.append({
+                "month": m, "label": m[5:] + "월",
+                "new": nc, "repeat": rc,
+                "rate": round(rc / tc * 100, 1) if tc else 0,
+            })
+
+        # ── 기간별 재구매율 ───────────────────────────────────
+        def safe_days(d1, d2):
+            try:    return (d2 - d1).days
+            except: return (d2.replace(tzinfo=None) - d1.replace(tzinfo=None)).days
+
+        repurchase_periods = {}
+        for days in [30, 60, 90, 120]:
+            eligible = repurchased = 0
+            for mid, dates in cust_dates.items():
+                ds = sorted(dates)
+                try:
+                    avail = safe_days(ds[0], ref_end)
+                except Exception:
+                    continue
+                if avail < days:
+                    continue
+                eligible += 1
+                if any(0 < safe_days(ds[0], d) <= days for d in ds[1:]):
+                    repurchased += 1
+            repurchase_periods[str(days)] = round(repurchased / eligible * 100, 1) if eligible else None
+
+        # ── 구매 퍼널 ─────────────────────────────────────────
+        funnel = [
+            {"stage": "방문자",    "count": None, "available": False},
+            {"stage": "상품 조회", "count": None, "available": False},
+            {"stage": "장바구니",  "count": None, "available": False},
+            {"stage": "주문 접수", "count": len(orders), "available": True},
+            {"stage": "결제 완료", "count": total_orders, "available": True},
+        ]
 
         return {
-            "kpi": kpi,
-            "seasonal": {"monthly_trend": m_trend}
+            "kpi":                kpi,
+            "daily_trend":        daily_trend,
+            "weekly_trend":       weekly_trend,
+            "monthly_trend":      monthly_trend,
+            "new_vs_repeat":      new_vs_repeat,
+            "repurchase_periods": repurchase_periods,
+            "funnel":             funnel,
+            # legacy key
+            "seasonal": {"monthly_trend": [{"month": m["label"], "revenue": m["revenue"], "orders": m["orders"]}
+                                            for m in monthly_trend]},
         }
     except Exception as e:
+        import traceback; traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/revenue")
@@ -617,75 +697,111 @@ def get_channels(start_date: Optional[str] = None, end_date: Optional[str] = Non
     }
 
 @app.get("/api/rfm")
-def get_rfm():
-    """Calculate RFM analysis from real order history"""
+def get_rfm(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """RFM analysis with quintile-based scoring (1-5 per dimension)"""
     if not client.access_token:
         return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-
     try:
-        sd = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
-        ed = datetime.now().strftime("%Y-%m-%d")
+        import bisect
+        today = datetime.now()
+        ed = end_date or today.strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        ref_date = parse_order_date(ed + "T23:59:59+09:00") or today
+
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
         paid_orders = paid_only(orders)
 
-        # Calculate RFM per customer
-        customer_stats = {}
-        now = datetime.now()
-
+        # Per-customer stats
+        cstats = {}
         for o in paid_orders:
-            cid = o.get('member_id', 'Guest')
-            if not cid or cid == 'Guest': continue
-
+            cid = o.get('member_id', '')
+            if not cid: continue
             d = parse_order_date(o.get('order_date', ''))
-            amt = float(o.get('payment_amount', 0) or 0)
+            if not d: continue
+            amt = order_revenue(o)
+            if cid not in cstats:
+                cstats[cid] = {"name": o.get('billing_name', cid), "last": d, "freq": 0, "monetary": 0.0}
+            cstats[cid]["freq"] += 1
+            cstats[cid]["monetary"] += amt
+            if d > cstats[cid]["last"]:
+                cstats[cid]["last"] = d
 
-            if not d:
-                continue
-            if cid not in customer_stats:
-                customer_stats[cid] = {"name": o.get('billing_name', cid), "last": d, "freq": 0, "monetary": 0}
+        if not cstats:
+            return {"summary": {}, "segments": [], "customers": []}
 
-            customer_stats[cid]["freq"] += 1
-            customer_stats[cid]["monetary"] += amt
-            if d > customer_stats[cid]["last"]:
-                customer_stats[cid]["last"] = d
+        # Build raw values
+        raw = []
+        for cid, s in cstats.items():
+            raw.append({"id": cid, "name": s["name"],
+                        "recency": max(0, (ref_date - s["last"]).days),
+                        "frequency": s["freq"], "monetary": s["monetary"]})
 
-        # Segmenting...
-        segment_names = ["Champions", "Loyal", "Promising", "At Risk", "Lost", "New"]
-        segments = {k: {"count": 0, "total": 0} for k in segment_names}
-        details = []
+        # Quintile scorer
+        def qscore(val, sorted_vals, reverse=False):
+            n = len(sorted_vals)
+            idx = bisect.bisect_left(sorted_vals, val)
+            s = min(5, int(idx / n * 5) + 1)
+            return (6 - s) if reverse else s
 
-        for cid, stat in customer_stats.items():
-            recency = (now - stat["last"]).days
-            freq = stat["freq"]
-            monetary = stat["monetary"]
+        r_sorted = sorted(c["recency"] for c in raw)
+        f_sorted = sorted(c["frequency"] for c in raw)
+        m_sorted = sorted(c["monetary"] for c in raw)
 
-            # User defined thresholds
-            rank = "New"
-            if recency <= 90 and freq >= 3 and monetary >= 120000: rank = "Champions"
-            elif recency <= 180 and freq >= 2 and monetary >= 70000: rank = "Loyal"
-            elif recency <= 180 and freq == 1 and monetary >= 30000: rank = "Promising"
-            elif 180 < recency <= 270 and freq >= 2 and monetary >= 70000: rank = "At Risk"
-            elif recency > 270: rank = "Lost"
+        def segment_label(r, f, m):
+            if r >= 4 and f >= 4: return "Champions"
+            if f >= 4 or (r >= 3 and f >= 3 and m >= 3): return "Loyal"
+            if r >= 4 and f == 1: return "New Customer"
+            if r >= 3 and f >= 2: return "Potential"
+            if r <= 2 and f >= 4: return "Can't Lose"
+            if r <= 2 and f >= 2: return "At Risk"
+            if r == 1 and f == 1: return "Lost"
+            return "Hibernating"
 
-            segments[rank]["count"] += 1
-            segments[rank]["total"] += monetary
-            if len(details) < 10: # Limit detail list
-                details.append({"name": stat["name"], "rank": rank, "last_order": stat["last"].strftime("%Y-%m-%d"), "monetary": monetary})
+        for c in raw:
+            c["r_score"] = qscore(c["recency"], r_sorted, reverse=True)
+            c["f_score"] = qscore(c["frequency"], f_sorted)
+            c["m_score"] = qscore(c["monetary"], m_sorted)
+            c["segment"] = segment_label(c["r_score"], c["f_score"], c["m_score"])
+            c["monetary"] = round(c["monetary"])
 
-        avg_order = []
-        for k in segment_names:
-            cnt = segments[k]["count"]
-            total = segments[k]["total"]
-            avg_order.append(round(total / cnt) if cnt > 0 else 0)
+        # Segment aggregation
+        seg_map = {}
+        for c in raw:
+            seg = c["segment"]
+            if seg not in seg_map:
+                seg_map[seg] = {"count": 0, "r_sum": 0, "f_sum": 0, "m_sum": 0}
+            seg_map[seg]["count"] += 1
+            seg_map[seg]["r_sum"] += c["recency"]
+            seg_map[seg]["f_sum"] += c["frequency"]
+            seg_map[seg]["m_sum"] += c["monetary"]
 
-        return {
-            "groups": segment_names,
-            "counts": [segments[k]["count"] for k in segment_names],
-            "avg_order": avg_order,
-            "customers": details
+        total = len(raw)
+        seg_order = ["Champions", "Loyal", "New Customer", "Potential", "At Risk", "Can't Lose", "Hibernating", "Lost"]
+        segments = []
+        for seg in seg_order:
+            if seg not in seg_map: continue
+            d = seg_map[seg]
+            cnt = d["count"]
+            segments.append({
+                "id": seg,
+                "count": cnt,
+                "pct": round(cnt / total * 100, 1),
+                "avg_recency": round(d["r_sum"] / cnt),
+                "avg_frequency": round(d["f_sum"] / cnt, 1),
+                "avg_monetary": round(d["m_sum"] / cnt),
+            })
+
+        summary = {
+            "total_customers": total,
+            "avg_recency": round(sum(c["recency"] for c in raw) / total),
+            "avg_frequency": round(sum(c["frequency"] for c in raw) / total, 1),
+            "avg_monetary": round(sum(c["monetary"] for c in raw) / total),
         }
+
+        top_customers = sorted(raw, key=lambda x: -x["monetary"])[:50]
+        return {"summary": summary, "segments": segments, "customers": top_customers}
     except Exception as e:
-        return {"groups": [], "counts": [], "avg_order": [], "customers": [], "error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/churn")
 def get_churn():
@@ -981,6 +1097,194 @@ def get_coupons(start_date: Optional[str] = None, end_date: Optional[str] = None
         }
     except Exception as e:
         return {"usage_rate": 0, "aov_comparison": {"labels": [], "data": []}, "contribution": {"labels": [], "data": []}, "error": str(e)}
+
+@app.get("/api/cohort")
+def get_cohort(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """코호트 리텐션 분석: 첫 구매월 기준 월별 재구매율"""
+    if not client.access_token:
+        return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+    try:
+        from collections import defaultdict
+        today = datetime.now()
+        ed = end_date or today.strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+
+        orders = fetch_all_orders({"start_date": sd, "end_date": ed})
+        paid = paid_only(orders)
+
+        # 고객별 주문일 목록
+        customer_orders: dict = defaultdict(list)
+        for o in paid:
+            mid = o.get('member_id', '')
+            if not mid:
+                continue
+            d = parse_order_date(o.get('order_date', ''))
+            if d:
+                customer_orders[mid].append(d)
+
+        if not customer_orders:
+            return {"cohorts": [], "max_periods": 0, "avg_retention": []}
+
+        # 첫 구매월로 코호트 배정
+        first_purchase = {mid: min(dates) for mid, dates in customer_orders.items()}
+
+        # matrix[cohort_ym][period_offset] = set of member_ids
+        matrix: dict = defaultdict(lambda: defaultdict(set))
+        cohort_members: dict = defaultdict(set)
+
+        for mid, dates in customer_orders.items():
+            fp = first_purchase[mid]
+            cohort_ym = fp.strftime("%Y-%m")
+            cohort_members[cohort_ym].add(mid)
+            for d in dates:
+                period = (d.year - fp.year) * 12 + (d.month - fp.month)
+                matrix[cohort_ym][period].add(mid)
+
+        sorted_cohorts = sorted(cohort_members.keys())
+        max_periods = max(
+            (max(matrix[c].keys()) for c in sorted_cohorts if matrix[c]),
+            default=0
+        )
+
+        cohorts = []
+        for c in sorted_cohorts:
+            size = len(cohort_members[c])
+            cells = []
+            for p in range(max_periods + 1):
+                count = len(matrix[c].get(p, set()))
+                cells.append({
+                    "period": p,
+                    "count": count,
+                    "rate": round(count / size * 100, 1) if size > 0 else 0
+                })
+            cohorts.append({
+                "label": c,
+                "label_short": c[5:] + "월",
+                "size": size,
+                "cells": cells
+            })
+
+        # 기간별 평균 리텐션 (period>0 이고 데이터 있는 코호트만)
+        avg_retention = []
+        for p in range(max_periods + 1):
+            rates = [
+                c["cells"][p]["rate"]
+                for c in cohorts
+                if p < len(c["cells"]) and (p == 0 or c["cells"][p]["count"] > 0)
+            ]
+            avg_retention.append(round(sum(rates) / len(rates), 1) if rates else 0)
+
+        return {
+            "cohorts": cohorts,
+            "max_periods": max_periods,
+            "avg_retention": avg_retention,
+        }
+    except Exception as e:
+        return {"cohorts": [], "max_periods": 0, "avg_retention": [], "error": str(e)}
+
+
+@app.get("/api/purchase-pattern")
+def get_purchase_pattern(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """구매 패턴 분석: 히트맵, 요일별/시간대별/월별 집계, 재구매 간격"""
+    if not client.access_token:
+        return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+    try:
+        from collections import defaultdict
+        today = datetime.now()
+        ed = end_date or today.strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+
+        orders = fetch_all_orders({"start_date": sd, "end_date": ed})
+        paid = paid_only(orders)
+
+        # 집계 컨테이너
+        heatmap = [[0] * 7 for _ in range(24)]   # heatmap[hour][weekday]
+        by_hour = [{"hour": h, "count": 0, "revenue": 0.0} for h in range(24)]
+        by_weekday = [{"day": d, "label": l, "count": 0, "revenue": 0.0}
+                      for d, l in enumerate(['월', '화', '수', '목', '금', '토', '일'])]
+        monthly = defaultdict(lambda: {"count": 0, "revenue": 0.0})
+        cust_dates = defaultdict(list)   # member_id → [datetime, ...]
+
+        for o in paid:
+            d = parse_order_date(o.get('order_date', ''))
+            if not d:
+                continue
+            amt = order_revenue(o)
+
+            heatmap[d.hour][d.weekday()] += 1
+            by_hour[d.hour]["count"] += 1
+            by_hour[d.hour]["revenue"] += amt
+            by_weekday[d.weekday()]["count"] += 1
+            by_weekday[d.weekday()]["revenue"] += amt
+
+            month_key = d.strftime("%Y-%m")
+            monthly[month_key]["count"] += 1
+            monthly[month_key]["revenue"] += amt
+
+            mid = o.get('member_id', '')
+            if mid:
+                cust_dates[mid].append(d)
+
+        # 월별 추이 (정렬)
+        monthly_trend = [
+            {"month": k, "label": k[5:] + "월", "count": v["count"], "revenue": round(v["revenue"])}
+            for k, v in sorted(monthly.items())
+        ]
+
+        # 재구매 간격 히스토그램
+        buckets = [
+            {"label": "1주 이내",  "min": 1,  "max": 7,   "count": 0},
+            {"label": "2주",       "min": 8,  "max": 14,  "count": 0},
+            {"label": "1개월",     "min": 15, "max": 30,  "count": 0},
+            {"label": "2개월",     "min": 31, "max": 60,  "count": 0},
+            {"label": "3개월",     "min": 61, "max": 90,  "count": 0},
+            {"label": "91일+",     "min": 91, "max": 9999,"count": 0},
+        ]
+        interval_days = []
+        for dates in cust_dates.values():
+            if len(dates) < 2:
+                continue
+            dates_sorted = sorted(dates)
+            for i in range(1, len(dates_sorted)):
+                diff = (dates_sorted[i] - dates_sorted[i - 1]).days
+                if diff > 0:
+                    interval_days.append(diff)
+                    for b in buckets:
+                        if b["min"] <= diff <= b["max"]:
+                            b["count"] += 1
+                            break
+
+        avg_interval = round(sum(interval_days) / len(interval_days)) if interval_days else 0
+
+        # 라운드
+        for h in by_hour:
+            h["revenue"] = round(h["revenue"])
+        for d in by_weekday:
+            d["revenue"] = round(d["revenue"])
+
+        # 정렬용 top 요일/시간
+        peak_hour = max(by_hour, key=lambda x: x["count"])["hour"]
+        peak_day = max(by_weekday, key=lambda x: x["count"])["day"]
+        weekday_labels = ['월', '화', '수', '목', '금', '토', '일']
+
+        return {
+            "heatmap": heatmap,
+            "by_hour": by_hour,
+            "by_weekday": by_weekday,
+            "monthly_trend": monthly_trend,
+            "interval_hist": buckets,
+            "summary": {
+                "peak_hour": peak_hour,
+                "peak_day": weekday_labels[peak_day],
+                "avg_interval": avg_interval,
+                "repeat_customers": len([d for d in cust_dates.values() if len(d) >= 2]),
+                "total_customers": len(cust_dates),
+            }
+        }
+    except Exception as e:
+        return {"heatmap": [], "by_hour": [], "by_weekday": [], "monthly_trend": [],
+                "interval_hist": [], "summary": {}, "error": str(e)}
+
 
 if __name__ == "__main__":
     uvicorn.run("api:app", host="localhost", port=3000, reload=False)

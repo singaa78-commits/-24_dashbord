@@ -3,6 +3,9 @@ import { LayoutDashboard, Users, ShoppingBag, Layers, BarChart3, Filter } from '
 import { cn } from './lib/utils';
 import Overview from './tabs/Overview';
 import Products from './tabs/Products';
+import Customers from './tabs/Customers';
+import PurchasePattern from './tabs/PurchasePattern';
+import Cohort from './tabs/Cohort';
 
 const TABS = [
     { id: 'overview', label: '종합 분석', icon: LayoutDashboard },
@@ -30,7 +33,10 @@ function App() {
         const props = { period, customRange: period === 'custom' ? customRange : null };
         switch (activeTab) {
             case 'overview': return <Overview {...props} />;
+            case 'customer': return <Customers {...props} />;
             case 'product': return <Products {...props} />;
+            case 'cohort': return <Cohort {...props} />;
+            case 'pattern': return <PurchasePattern {...props} />;
             default: return (
                 <div className="flex flex-col items-center justify-center p-20 text-gray-400">
                     <div className="text-xl font-medium mb-2">{TABS.find(t => t.id === activeTab)?.label} 탭 준비 중</div>
