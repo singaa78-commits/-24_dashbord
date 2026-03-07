@@ -15,6 +15,7 @@ import threading
 import os
 
 _FETCH_LOCK = threading.Lock()
+_FETCHING_KEYS = set()  # Track which keys are currently being fetched to avoid duplication
 _CACHE = {}
 _CACHE_FILE = "orders_cache.json"
 
@@ -32,54 +33,86 @@ def fetch_all_orders(params: dict) -> list:
     15000건 이상의 데이터 요청 시 422 에러 발생 대응."""
     cache_key = json.dumps(params, sort_keys=True)
     
+    # Check cache first (Outside lock for read performance)
+    if cache_key in _CACHE:
+        entry = _CACHE[cache_key]
+        if time.time() - entry["time"] < 7200:
+            return entry["data"]
+
+    # Lock briefly to coordinate fetching
     with _FETCH_LOCK:
+        if cache_key in _FETCHING_KEYS:
+            # Another thread is already fetching this. 
+            # In a simple app, we could just wait or retry after sleep.
+            # For now, let's wait a bit and check cache again.
+            pass
+        else:
+            _FETCHING_KEYS.add(cache_key)
+
+    try:
+        # If we are here, we might be the first to fetch this key
+        # (Re-check cache inside try just in case someone finished while we were locking)
         if cache_key in _CACHE:
             entry = _CACHE[cache_key]
-            # 2 hours cache (7200s)
             if time.time() - entry["time"] < 7200:
-                print(f"[CACHE HIT] Returning {len(entry['data'])} orders for params: {params}")
                 return entry["data"]
-                
+
         print(f"[FETCH START] Fetching orders with params: {params}")
         all_orders = []
         offset = 0
         per_page = 100
         base_params = {**params, "limit": per_page}
+        error_occurred = False
+        
         while True:
             base_params["offset"] = offset
+            success = False
             for attempt in range(3):
                 try:
+                    # Added timeout to prevent hanging the whole server
                     data = client.call_api("orders", params=base_params)
+                    success = True
                     break
                 except Exception as e:
                     if "429" in str(e) and attempt < 2:
                         print(f"[RATE LIMIT] Hit rate limit on offset {offset}, retrying...")
                         time.sleep(2 ** attempt + 1)
                     elif "422" in str(e):
-                        print(f"[API LIMIT] Max offset reached at {offset}. Stopping fetch gracefully.")
+                        if offset > 0:
+                            print(f"[API LIMIT] Max offset reached at {offset}. Stopping fetch gracefully.")
+                            success = True
+                        else:
+                            print(f"[API ERROR] 422 Error at offset 0: {e}. Likely invalid params.")
+                            error_occurred = True
                         data = {"orders": []}
                         break
                     else:
-                        raise
+                        print(f"[API ERROR] Unexpected error: {e}")
+                        error_occurred = True
+                        break
             
+            if error_occurred: break
+                
             batch = data.get("orders", [])
             all_orders.extend(batch)
-            print(f"[FETCH BATCH] Received {len(batch)} orders at offset {offset}. Total: {len(all_orders)}")
             
-            if len(batch) < per_page or offset >= 15000:
+            if not success or len(batch) < per_page or offset >= 15000:
                 break
             offset += per_page
             time.sleep(0.55)
             
-        _CACHE[cache_key] = {"time": time.time(), "data": all_orders}
-        try:
-            with open(_CACHE_FILE, "w") as f:
-                json.dump(_CACHE, f)
-        except Exception as e:
-            print(f"[CACHE ERROR] Could not save to disk: {e}")
-            
-        print(f"[FETCH COMPLETE] Finished fetching {len(all_orders)} total orders.")
+        if not error_occurred:
+            with _FETCH_LOCK:
+                _CACHE[cache_key] = {"time": time.time(), "data": all_orders}
+                try:
+                    with open(_CACHE_FILE, "w") as f:
+                        json.dump(_CACHE, f)
+                except: pass
         return all_orders
+    finally:
+        with _FETCH_LOCK:
+            if cache_key in _FETCHING_KEYS:
+                _FETCHING_KEYS.remove(cache_key)
 
 
 def order_revenue(order: dict) -> float:
@@ -121,17 +154,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files (dashboard.html, css, js if any) from the current directory
-app.mount("/static", StaticFiles(directory="."), name="static")
+# Serve static files from React build directory
+if os.path.exists("dist"):
+    app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
 
 @app.get("/")
 def read_root():
-    """Serve the dashboard HTML"""
+    """Serve the modern React dashboard with localtunnel bypass"""
+    if os.path.exists("dist/index.html"):
+        return FileResponse("dist/index.html", headers={"Bypass-Tunnel-Reminder": "true"})
+    return FileResponse("dashboard.html")
+
+@app.get("/legacy")
+def read_legacy_dashboard():
+    """Serve the legacy Chart.js dashboard"""
     return FileResponse("dashboard.html")
 
 @app.get("/dashboard.html")
 def read_dashboard():
-    """Serve the dashboard HTML"""
+    """Serve the legacy dashboard HTML"""
     return FileResponse("dashboard.html")
 
 @app.get("/auth/login")
@@ -158,7 +199,7 @@ def callback(code: Optional[str] = None, error: Optional[str] = None, error_desc
         # Fetch token with auth code
         token_data = client.fetch_token(code)
         # Redirect back to the dashboard frontend hosted by this FastAPI server
-        return RedirectResponse(url="/dashboard.html")
+        return RedirectResponse(url="/")
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": "token_fetch_failed", "details": str(e)})
 
@@ -330,19 +371,75 @@ def get_kpi(start_date: Optional[str] = None, end_date: Optional[str] = None):
         repurchase_rate = round((repeat_buyers / len(buyer_counts) * 100), 1) if buyer_counts else 0
 
         return {
-            "total_revenue": total_revenue,
-            "total_orders": total_orders,
+            "revenue": total_revenue,
+            "orders": total_orders,
             "new_customers": new_customers,
-            "repurchase_rate": repurchase_rate
+            "repurchase_rate": repurchase_rate,
+            "aov": round(total_revenue / total_orders, 0) if total_orders > 0 else 0,
+            "new_customers_ratio": round((new_customers / len(buyer_counts) * 100), 1) if buyer_counts else 0,
+            "start_date": start,
+            "end_date": end
         }
     except Exception as e:
-        return {
-            "total_revenue": 0,
-            "total_orders": 0,
-            "new_customers": 0,
-            "repurchase_rate": 0,
-            "message": f"Real-time sync error or no data: {str(e)}"
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/api/overview-data")
+def get_overview_data(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """Unified endpoint to return all data for the overview tab in one request"""
+    if not client.access_token:
+        return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+    
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        start = start_date or today
+        end = end_date or today
+
+        # Fetch all orders once
+        orders = fetch_all_orders({"start_date": start, "end_date": end})
+        paid_orders = paid_only(orders)
+
+        # 1. Calculate KPIs
+        total_revenue = sum(order_revenue(o) for o in paid_orders)
+        total_orders = len(paid_orders)
+        
+        from collections import Counter
+        buyer_ids = {o.get('member_id') for o in paid_orders if o.get('member_id')}
+        new_customers = sum(1 for o in paid_orders if o.get('first_order') in ('T', True) and o.get('member_id'))
+        
+        buyer_counts = Counter(o.get('member_id') for o in paid_orders if o.get('member_id'))
+        repeat_buyers = sum(1 for cnt in buyer_counts.values() if cnt > 1)
+        repurchase_rate = round((repeat_buyers / len(buyer_counts) * 100), 1) if buyer_counts else 0
+
+        kpi = {
+            "revenue": total_revenue,
+            "orders": total_orders,
+            "new_customers": new_customers,
+            "repurchase_rate": repurchase_rate,
+            "aov": round(total_revenue / total_orders, 0) if total_orders > 0 else 0,
+            "new_customers_ratio": round((new_customers / len(buyer_counts) * 100), 1) if buyer_counts else 0
         }
+
+        # 2. Calculate Seasonal Trend
+        monthly_rev = Counter()
+        monthly_ord = Counter()
+        for o in paid_orders:
+            d_str = o.get('order_date', '')[:10]
+            if not d_str: continue
+            m = datetime.fromisoformat(d_str).month
+            monthly_rev[m] += order_revenue(o)
+            monthly_ord[m] += 1
+        
+        m_trend = []
+        for i in range(1, 13):
+            if i in monthly_rev or i in monthly_ord:
+                m_trend.append({"month": f"{i}월", "revenue": monthly_rev[i], "orders": monthly_ord[i]})
+
+        return {
+            "kpi": kpi,
+            "seasonal": {"monthly_trend": m_trend}
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/revenue")
 def get_revenue(start_date: Optional[str] = None, end_date: Optional[str] = None):
@@ -581,64 +678,132 @@ def get_churn():
     except Exception as e:
         return {"summary": {"target_count": 0}, "customers": [], "error": str(e)}
 
-@app.get("/api/products")
-def get_products(start_date: Optional[str] = None, end_date: Optional[str] = None):
-    """Verifiable product insights"""
+@app.get("/api/product-search")
+def search_products(q: Optional[str] = None):
+    """Return a list of unique product names for the search sidebar"""
     if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     try:
-        sd = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
+        # Fetch recent products from the last 30 days to keep it fast
+        sd = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
         orders = fetch_all_orders({"start_date": sd})
+        
+        products = set()
+        for o in orders:
+            for item in o.get('items', []):
+                pname = item.get('product_name')
+                if pname: products.add(pname)
+        
+        plist = sorted(list(products))
+        if q:
+            plist = [p for p in plist if q.lower() in p.lower()]
+            
+        return {"products": [{"name": p} for p in plist[:50]]} # Limit to 50
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/api/product-analysis")
+def get_product_analysis(start_date: Optional[str] = None, end_date: Optional[str] = None, product_name: Optional[str] = None):
+    """Unified endpoint for Phase 2 Product Analysis tab"""
+    if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+    try:
+        today = datetime.now()
+        s = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        e = end_date or today.strftime("%Y-%m-%d")
+        
+        orders = fetch_all_orders({"start_date": s, "end_date": e})
         paid_orders = paid_only(orders)
 
-        from collections import defaultdict
-        product_buyers = defaultdict(set)
-        product_returns = defaultdict(int)
-        product_sales = defaultdict(int)
+        from collections import defaultdict, Counter
+        
+        # Product Metrics
+        p_stats = defaultdict(lambda: {"sales": 0, "revenue": 0, "returns": 0, "buyers": set()})
+        basket_pairs = Counter() # (Product A, Product B) -> Count
         
         for o in paid_orders:
-            cid = o.get('member_id')
-            if not cid or cid == 'Guest': continue
+            cid = o.get('member_id', 'Guest')
+            items = o.get('items', [])
             
-            for item in o.get('items', []):
+            # Extract distinct items in this cart for basket analysis
+            cart_item_names = sorted(list({item.get('product_name') for item in items if item.get('product_name')}))
+            
+            # Update metrics per item
+            for item in items:
                 pname = item.get('product_name')
                 if not pname: continue
                 
-                product_sales[pname] += 1
-                product_buyers[pname].add(cid)
-                if item.get('order_status') in ('C40', 'C41', 'R40', 'E40'): # Returns/Cancellations
-                    product_returns[pname] += 1
-
-        repurchase = {}
-        returns = {}
-        for p, sales in product_sales.items():
-            if sales > 5: # Threshold
-                buyers = len(product_buyers[p])
-                repurchase[p] = round((sales - buyers) / sales * 100, 1)
-                returns[p] = round((product_returns[p] / sales) * 100, 1)
+                # If product_name filter is applied, only focus on that
+                if product_name and product_name.lower() not in pname.lower():
+                    continue
                 
-        # Top 10
-        top_rep = sorted(repurchase.items(), key=lambda x: x[1], reverse=True)[:10]
-        top_ret = sorted(returns.items(), key=lambda x: x[1], reverse=True)[:10]
+                qty = int(item.get('quantity', 1))
+                price = float(item.get('product_price', 0))
+                
+                p_stats[pname]["sales"] += qty
+                p_stats[pname]["revenue"] += (price * qty)
+                p_stats[pname]["buyers"].add(cid)
+                
+                if item.get('order_status') in ('C40', 'C41', 'R40', 'E40'):
+                    p_stats[pname]["returns"] += qty
+            
+            # Basket combinations (only if no product filter is applied, or if the filter matches one of the items)
+            if not product_name or any(product_name.lower() in name.lower() for name in cart_item_names):
+                for i in range(len(cart_item_names)):
+                    for j in range(i + 1, len(cart_item_names)):
+                        basket_pairs[(cart_item_names[i], cart_item_names[j])] += 1
+
+        # Format stats for frontend
+        products_list = []
+        for name, stat in p_stats.items():
+            sales = stat["sales"]
+            buyers = len(stat["buyers"])
+            products_list.append({
+                "name": name,
+                "sales": sales,
+                "revenue": stat["revenue"],
+                "return_rate": round((stat["returns"] / sales * 100), 1) if sales > 0 else 0,
+                "repurchase_rate": round(((sales - buyers) / sales * 100), 1) if sales > 0 else 0
+            })
+
+        # Top 10 products by revenue
+        top_products = sorted(products_list, key=lambda x: x["revenue"], reverse=True)[:10]
+
+        # Basket Affinity Matrix
+        top_pairs = []
+        for (p1, p2), count in basket_pairs.most_common(15):
+            top_pairs.append({"p1": p1, "p2": p2, "count": count})
 
         return {
-            "repurchase_top10": {"labels": [x[0][:15]+".." if len(x[0])>15 else x[0] for x in top_rep], "data": [x[1] for x in top_rep]},
-            "return_rates": {"labels": [x[0][:15]+".." if len(x[0])>15 else x[0] for x in top_ret], "data": [x[1] for x in top_ret]}
+            "products": top_products, # For table/charts
+            "basket": top_pairs,
+            "summary": {
+                "total_items": len(products_list),
+                "total_sales": sum(p["sales"] for p in products_list)
+            }
         }
     except Exception as e:
-        return {"repurchase_top10": {"labels": [], "data": []}, "return_rates": {"labels": [], "data": []}, "error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/api/products")
+def get_products_legacy(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    # Keep original for compatibility if needed, but point to logic or keep it
+    return get_product_analysis(start_date, end_date)
 
 @app.get("/api/seasonal")
 def get_seasonal(start_date: Optional[str] = None, end_date: Optional[str] = None):
     """Verifiable seasonal growth based on order history"""
     if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     try:
-        sd = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
-        ed = datetime.now().strftime("%Y-%m-%d")
+        # Use provided dates or default to last 90 days
+        today = datetime.now()
+        ed = end_date or today.strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
         paid_orders = paid_only(orders)
 
         from collections import defaultdict
-        monthly = defaultdict(float)
+        monthly_rev = defaultdict(float)
+        monthly_ord = defaultdict(int)
         heatmap = [[0] * 7 for _ in range(24)]
 
         for o in paid_orders:
@@ -647,17 +812,32 @@ def get_seasonal(start_date: Optional[str] = None, end_date: Optional[str] = Non
             d = parse_order_date(d_str)
             amt = order_revenue(o)
             
-            monthly[d.month] += amt
+            monthly_rev[d.month] += amt
+            monthly_ord[d.month] += 1
             heatmap[d.hour][d.weekday()] += 1
 
-        m_trend = [monthly.get(i, 0) for i in range(1, 13)]
+        m_trend = []
+        # 현재 월부터 과거 3개월만 표시하거나 전체 표시 (React 차트 데이터 형식에 맞춤)
+        for i in range(1, 13):
+            if monthly_rev.get(i, 0) > 0 or monthly_ord.get(i, 0) > 0:
+                m_trend.append({
+                    "month": f"{i}월",
+                    "revenue": monthly_rev.get(i, 0),
+                    "orders": monthly_ord.get(i, 0)
+                })
+
         return {
             "monthly_trend": m_trend,
             "heatmap": heatmap,
-            "seasonal_growth": {"봄(3-5월)": sum(m_trend[2:5]), "여름(6-8월)": sum(m_trend[5:8]), "가을(9-11월)": sum(m_trend[8:11]), "겨울(12-2월)": m_trend[11]+m_trend[0]+m_trend[1]}
+            "seasonal_growth": {
+                "봄(3-5월)": sum(monthly_rev.get(i, 0) for i in range(3, 6)),
+                "여름(6-8월)": sum(monthly_rev.get(i, 0) for i in range(6, 9)),
+                "가을(9-11월)": sum(monthly_rev.get(i, 0) for i in range(9, 12)),
+                "겨울(12-2월)": monthly_rev.get(12, 0) + monthly_rev.get(1, 0) + monthly_rev.get(2, 0)
+            }
         }
     except Exception as e:
-        return {"monthly_trend": [0]*12, "heatmap": [[0]*7 for _ in range(24)], "error": str(e)}
+        return {"monthly_trend": [], "heatmap": [[0]*7 for _ in range(24)], "error": str(e)}
 
 @app.get("/api/coupons")
 def get_coupons(start_date: Optional[str] = None, end_date: Optional[str] = None):

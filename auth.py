@@ -139,7 +139,8 @@ class Cafe24Client:
                 url=url,
                 headers=self.get_headers(),
                 params=params,
-                json=data
+                json=data,
+                timeout=30
             )
             if response.status_code == 401:
                 # Token might be expired, try refreshing
