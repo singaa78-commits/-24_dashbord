@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cafe24 Growth Marketing Dashboard</title>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #0a0c10;
+            --surface-color: #1a1d24;
+            --point-color: #00e5a0;
+            --text-main: #ffffff;
+            --text-muted: #8b949e;
+            --border-color: #30363d;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+        }
+
+        .header {
+            padding: 1rem 2rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background-color: var(--surface-color);
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            color: var(--point-color);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 1rem;
+            padding: 0 2rem;
+            border-bottom: 1px solid var(--border-color);
+            background-color: var(--surface-color);
+        }
+
+        .tab {
+            padding: 1rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            color: var(--text-main);
+        }
+
+        .tab.active {
+            color: var(--point-color);
+            border-bottom-color: var(--point-color);
+        }
+
+        .container {
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .tab-content {
+            display: none;
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* KPI Cards */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .kpi-card {
+            background-color: var(--surface-color);
+            padding: 1.5rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .kpi-title {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .kpi-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--text-main);
+        }
+
+        /* Charts Grid */
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .chart-card {
+            background-color: var(--surface-color);
+            padding: 1.5rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            height: 400px;
+            /* Fixed height for standard charts */
+        }
+
+        .chart-card.full-width {
+            grid-column: 1 / -1;
+            height: 500px;
+            /* Fixed height for full-width charts */
+        }
+
+
+        .chart-title {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            color: var(--text-muted);
+        }
+
+        /* Tables */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        .data-table th,
+        .data-table td {
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .data-table th {
+            color: var(--text-muted);
+            font-weight: normal;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+        }
+
+        /* Risk Badges */
+        .badge {
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .badge-yellow {
+            background: #facc15;
+            color: #000;
+        }
+
+        .badge-orange {
+            background: #f97316;
+            color: #fff;
+        }
+
+        .badge-red {
+            background: #ef4444;
+            color: #fff;
+        }
+
+        .badge-point {
+            background: var(--point-color);
+            color: var(--bg-color);
+        }
+
+        /* Heatmap Grid */
+        .heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 2px;
+            background-color: var(--border-color);
+            border: 1px solid var(--border-color);
+        }
+
+        .heatmap-cell {
+            aspect-ratio: 1;
+            background-color: var(--surface-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+        }
+
+        /* Filter Bar */
+        .filter-bar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            background-color: var(--surface-color);
+            padding: 0.5rem 2rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .filter-input {
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 0.3rem 0.5rem;
+            border-radius: 4px;
+            outline: none;
+        }
+
+        .filter-input:focus {
+            border-color: var(--point-color);
+        }
+
+        .btn-apply {
+            background-color: var(--point-color);
+            color: var(--bg-color);
+            border: none;
+            padding: 0.3rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 0.85rem;
+            transition: opacity 0.2s;
+        }
+
+        .btn-apply:hover {
+            opacity: 0.8;
+        }
+    </style>
+</head>
+
+<body>
+    <header class="header">
+        <h1>가시제거연구소 <span style="font-size: 0.8rem; opacity: 0.6;">v2.0 Real-Data</span></h1>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+            <a href="/auth/login" id="login-btn"
+                style="background: #3b82f6; color: white; padding: 0.3rem 0.8rem; border-radius: 4px; text-decoration: none; font-size: 0.8rem; display: none; line-height: 1;">Cafe24
+                연동하기</a>
+            <div id="sync-time" style="font-size: 0.8rem; color: var(--text-muted);">Sync: -</div>
+            <div id="status" style="color: var(--text-muted); font-size: 0.9rem;">Connecting...</div>
+        </div>
+    </header>
+
+    <div class="filter-bar">
+        <div class="filter-group">
+            <label>기간 설정:</label>
+            <input type="date" id="start-date" class="filter-input">
+            <span>~</span>
+            <input type="date" id="end-date" class="filter-input">
+        </div>
+        <button class="btn-apply" onclick="loadDashboard()">조회</button>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" data-target="tab-overview">전체 개요</div>
+        <div class="tab" data-target="tab-acquisition">채널 성과</div>
+        <div class="tab" data-target="tab-retention">리텐션 & LTV</div>
+        <div class="tab" data-target="tab-rfm">RFM 분석</div>
+        <div class="tab" data-target="tab-churn">이탈 위험 고객</div>
+        <div class="tab" data-target="tab-products">상품별 재구매</div>
+        <div class="tab" data-target="tab-seasonal">계절별 패턴</div>
+        <div class="tab" data-target="tab-coupons">쿠폰 효과</div>
+    </div>
+
+    <div class="container">
+        <!-- Overview Tab -->
+        <div id="tab-overview" class="tab-content active">
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-title">매출 합계</div>
+                    <div class="kpi-value" id="kpi-revenue">-</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">주문 수</div>
+                    <div class="kpi-value" id="kpi-orders">-</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">신규 구매 회원</div>
+                    <div class="kpi-value" id="kpi-new-customers">-</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">재구매율</div>
+                    <div class="kpi-value" id="kpi-repurchase">-</div>
+                </div>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card full-width revenue-chart">
+                    <div class="chart-title">일별 매출 추이 (최근 30일)</div>
+                    <canvas id="revenueChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">채널별 매출 비중</div>
+                    <canvas id="channelDonutChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Acquisition Tab -->
+        <div id="tab-acquisition" class="tab-content">
+            <div class="chart-grid">
+                <div class="chart-card full-width">
+                    <div class="chart-title">유입 채널별 매출 성과 (가상 추측 제거)</div>
+                    <table class="data-table" id="channelTable">
+                        <thead>
+                            <tr>
+                                <th>채널</th>
+                                <th>매출액</th>
+                                <th>주문수</th>
+                                <th>신규고객</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                    <div class="loading" id="channelMsg" style="padding: 1rem; color: var(--point-color);"></div>
+                </div>
+                <div class="chart-card full-width">
+                    <div class="chart-title">채널 효율 (ROAS vs 매출)</div>
+                    <canvas id="roasScatterChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Retention Tab -->
+        <div id="tab-retention" class="tab-content">
+            <div class="chart-grid">
+                <div class="chart-card full-width">
+                    <div class="chart-title">월별 코호트 리텐션</div>
+                    <table class="data-table" id="cohortTable">
+                        <thead>
+                            <tr>
+                                <th>Cohort</th>
+                                <th>M0</th>
+                                <th>M1</th>
+                                <th>M2</th>
+                                <th>M3</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">고객 LTV 분포</div>
+                    <canvas id="ltvBarChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">리텐션 트렌드</div>
+                    <canvas id="retentionTrendChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+
+        <!-- RFM Tab -->
+        <div id="tab-rfm" class="tab-content">
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <div class="chart-title">등급별 고객 수 분포</div>
+                    <canvas id="rfmDonutChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">등급별 평균 주문금액</div>
+                    <canvas id="rfmAovBarChart"></canvas>
+                </div>
+                <div class="chart-card full-width">
+                    <div class="chart-title">RFM 고객 상세 정보</div>
+                    <table class="data-table" id="rfmTable">
+                        <thead>
+                            <tr>
+                                <th>이름</th>
+                                <th>등급</th>
+                                <th>마지막 구매일</th>
+                                <th>총 구매금액</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Churn Tab -->
+        <div id="tab-churn" class="tab-content">
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-title">재구매 유도 대상 고객 수</div>
+                    <div class="kpi-value" id="churn-target-count">-</div>
+                </div>
+            </div>
+            <div class="chart-card full-width">
+                <div class="chart-title">이탈 위험 고객 목록 (90일 이상 미구매)</div>
+                <table class="data-table" id="churnTable">
+                    <thead>
+                        <tr>
+                            <th>이름</th>
+                            <th>마지막 구매일</th>
+                            <th>경과일수</th>
+                            <th>총 구매횟수</th>
+                            <th>등급</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Products Tab -->
+        <div id="tab-products" class="tab-content">
+            <div class="chart-grid">
+                <div class="chart-card full-width">
+                    <div class="chart-title">상품별 재구매율 TOP 10 (%)</div>
+                    <canvas id="productRepurchaseChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">상품별 반품/취소율 (%)</div>
+                    <canvas id="returnRateChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Seasonal Tab -->
+        <div id="tab-seasonal" class="tab-content">
+            <div class="chart-grid">
+                <div class="chart-card full-width">
+                    <div class="chart-title">월별 매출 추이 (12개월)</div>
+                    <canvas id="seasonalTrendChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">요일별/시간대별 주문 히트맵 (상대적 비중)</div>
+                    <div id="heatmapContainer" class="heatmap-grid"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">명절/시즌별 성장률</div>
+                    <canvas id="holidayChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Coupons Tab -->
+        <div id="tab-coupons" class="tab-content">
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <div class="chart-title">쿠폰 사용률 (%)</div>
+                    <canvas id="couponUsageChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">쿠폰 사용 vs 미사용 객단가 (AOV)</div>
+                    <canvas id="couponAovChart"></canvas>
+                </div>
+                <div class="chart-card full-width">
+                    <div class="chart-title">할인율별 매출 기여도</div>
+                    <canvas id="couponContributionChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+        const AUTH_LOGIN = '/auth/login';
+
+        // Helper to format currency
+        const formatKRW = (num) => new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(num);
+        const formatNum = (num) => new Intl.NumberFormat('ko-KR').format(num);
+
+        // Chart default config for dark theme
+        Chart.defaults.color = '#8b949e';
+        Chart.defaults.borderColor = '#30363d';
+
+        // Tab switching logic
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.target).classList.add('active');
+            });
+        });
+
+        // Initialize Charts Variables
+        let revenueChart, channelDonutChart, roasScatterChart, ltvBarChart, retentionTrendChart;
+        let rfmDonutChart, rfmAovBarChart, productRepurchaseChart, returnRateChart, seasonalTrendChart, holidayChart, couponUsageChart, couponAovChart, couponContributionChart;
+
+        // Set default dates: last 30 days
+        const today = new Date();
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(today.getDate() - 29);
+
+        document.getElementById('start-date').value = thirtyDaysAgo.toISOString().split('T')[0];
+        document.getElementById('end-date').value = today.toISOString().split('T')[0];
+
+        function destroyCharts() {
+            [revenueChart, channelDonutChart, roasScatterChart, ltvBarChart, retentionTrendChart,
+             rfmDonutChart, rfmAovBarChart, productRepurchaseChart, returnRateChart,
+             seasonalTrendChart, holidayChart, couponUsageChart, couponAovChart, couponContributionChart
+            ].forEach(chart => {
+                if (chart) chart.destroy();
+            });
+        }
+
+        async function fetchAPI(endpoint) {
+            const startDate = document.getElementById('start-date').value;
+            const endDate = document.getElementById('end-date').value;
+            const url = `${API_BASE}${endpoint}?start_date=${startDate}&end_date=${endDate}`;
+
+            try {
+                const response = await fetch(url);
+                if (response.status === 401) return null;
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                return await response.json();
+            } catch (error) {
+                console.error(`Fetch Error [${endpoint}]:`, error);
+                return null;
+            }
+        }
+
+        async function loadDashboard() {
+            document.getElementById('status').innerText = 'Fetching Data...';
+            destroyCharts();
+
+            const [kpi, revenue, customers, channels, rfm, churn, products, seasonal, coupons] = await Promise.all([
+                fetchAPI('/kpi'),
+                fetchAPI('/revenue'),
+                fetchAPI('/customers'),
+                fetchAPI('/channels'),
+                fetchAPI('/rfm'),
+                fetchAPI('/churn'),
+                fetchAPI('/products'),
+                fetchAPI('/seasonal'),
+                fetchAPI('/coupons')
+            ]);
+
+            if (kpi === null) {
+                document.getElementById('status').innerText = '로그인 필요';
+                document.getElementById('status').style.color = '#ef4444';
+                document.getElementById('login-btn').style.display = 'inline-block';
+                return;
+            }
+
+            // If some data is missing but kpi is there, just show live but with notice
+            document.getElementById('login-btn').style.display = 'none';
+            document.getElementById('status').innerText = 'Live';
+            document.getElementById('status').style.color = 'var(--point-color)';
+            document.getElementById('sync-time').innerText = 'Sync: ' + new Date().toLocaleTimeString();
+
+            if (!revenue || !customers || !channels || !rfm || !churn || !products || !seasonal || !coupons) {
+                document.getElementById('status').innerText = '일부 데이터 누락';
+            }
+
+            // Render KPIs
+            document.getElementById('kpi-revenue').innerText = formatKRW(kpi.total_revenue);
+            document.getElementById('kpi-orders').innerText = formatNum(kpi.total_orders);
+            document.getElementById('kpi-new-customers').innerText = formatNum(kpi.new_customers);
+            document.getElementById('kpi-repurchase').innerText = kpi.repurchase_rate;
+            if (kpi.message) document.getElementById('status').innerText = 'Data Issues Found';
+
+            // Channels Cleanup
+            if (channels.message) document.getElementById('channelMsg').innerText = channels.message;
+
+            // Render Charts
+            renderOverviewCharts(revenue, channels);
+            renderAcquisition(channels);
+            renderRetention(customers);
+
+            // New Renders
+            renderRFM(rfm);
+            renderChurn(churn);
+            renderProducts(products);
+            renderSeasonal(seasonal);
+            renderCoupons(coupons);
+        }
+
+        function renderRFM(data) {
+            if (!data) return;
+            const ctxDonut = document.getElementById('rfmDonutChart').getContext('2d');
+            rfmDonutChart = new Chart(ctxDonut, {
+                type: 'doughnut',
+                data: {
+                    labels: data.groups || [],
+                    datasets: [{
+                        data: data.counts || [],
+                        backgroundColor: ['#00e5a0', '#3b82f6', '#8b5cf6', '#f97316', '#ef4444', '#94a3b8']
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const ctxBar = document.getElementById('rfmAovBarChart').getContext('2d');
+            rfmAovBarChart = new Chart(ctxBar, {
+                type: 'bar',
+                data: {
+                    labels: data.groups || [],
+                    datasets: [{
+                        label: '평균 주문금액',
+                        data: data.avg_order || [],
+                        backgroundColor: '#3b82f6'
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const tbody = document.querySelector('#rfmTable tbody');
+            tbody.innerHTML = '';
+            (data.customers || []).forEach(c => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${c.name}</td><td><span class="badge badge-point">${c.rank}</span></td><td>${c.last_order}</td><td>${formatKRW(c.monetary)}</td>`;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderChurn(data) {
+            if (!data) return;
+            document.getElementById('churn-target-count').innerText = formatNum((data.summary || {}).target_count || 0);
+            const tbody = document.querySelector('#churnTable tbody');
+            tbody.innerHTML = '';
+            (data.customers || []).forEach(c => {
+                let badgeClass = 'badge-yellow';
+                if (c.days > 180) badgeClass = 'badge-red';
+                else if (c.days > 120) badgeClass = 'badge-orange';
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${c.name}</td><td>${c.last_order}</td><td><span class="badge ${badgeClass}">${c.days}일</span></td><td>${c.total_orders}회</td><td>${c.rank || '-'}</td>`;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderProducts(data) {
+            if (!data) return;
+            const top10 = data.repurchase_top10 || { labels: [], data: [] };
+            const ctxBar = document.getElementById('productRepurchaseChart').getContext('2d');
+            productRepurchaseChart = new Chart(ctxBar, {
+                type: 'bar',
+                data: {
+                    labels: top10.labels,
+                    datasets: [{
+                        label: '재구매율 (%)',
+                        data: top10.data,
+                        backgroundColor: '#00e5a0'
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y' }
+            });
+
+            const rates = data.return_rates || { labels: [], data: [] };
+            const ctxRate = document.getElementById('returnRateChart').getContext('2d');
+            returnRateChart = new Chart(ctxRate, {
+                type: 'bar',
+                data: {
+                    labels: rates.labels,
+                    datasets: [{
+                        label: '반품/취소율 (%)',
+                        data: rates.data,
+                        backgroundColor: '#ef4444'
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+
+        function renderSeasonal(data) {
+            if (!data) return;
+            const ctxTrend = document.getElementById('seasonalTrendChart').getContext('2d');
+            seasonalTrendChart = new Chart(ctxTrend, {
+                type: 'line',
+                data: {
+                    labels: ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'],
+                    datasets: [{ label: '월별 매출', data: data.monthly_trend || [], borderColor: '#00e5a0', fill: false }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const container = document.getElementById('heatmapContainer');
+            container.innerHTML = '';
+            const days = ['월', '화', '수', '목', '금', '토', '일'];
+            (data.heatmap || []).forEach((row) => {
+                row.forEach((val, cIdx) => {
+                    const cell = document.createElement('div');
+                    cell.className = 'heatmap-cell';
+                    const opacity = Math.min(1, val / 150);
+                    cell.style.backgroundColor = `rgba(0, 229, 160, ${opacity})`;
+                    cell.innerText = days[cIdx];
+                    container.appendChild(cell);
+                });
+            });
+
+            const growthData = data.seasonal_growth || {};
+            const ctxHoliday = document.getElementById('holidayChart').getContext('2d');
+            holidayChart = new Chart(ctxHoliday, {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(growthData),
+                    datasets: [{ label: '시즌별 성장률 (%)', data: Object.values(growthData), backgroundColor: '#8b5cf6' }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+
+        function renderCoupons(data) {
+            if (!data) return;
+            const usageRate = data.usage_rate || 0;
+            const ctxUsage = document.getElementById('couponUsageChart').getContext('2d');
+            couponUsageChart = new Chart(ctxUsage, {
+                type: 'doughnut',
+                data: {
+                    labels: ['사용', '미사용'],
+                    datasets: [{ data: [usageRate, 100 - usageRate], backgroundColor: ['#00e5a0', '#30363d'] }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, cutout: '70%' }
+            });
+
+            const aov = data.aov_comparison || { labels: [], data: [] };
+            const ctxAov = document.getElementById('couponAovChart').getContext('2d');
+            couponAovChart = new Chart(ctxAov, {
+                type: 'bar',
+                data: {
+                    labels: aov.labels,
+                    datasets: [{ label: '객단가 (KRW)', data: aov.data, backgroundColor: '#3b82f6' }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const contrib = data.contribution || { labels: [], data: [] };
+            const ctxContrib = document.getElementById('couponContributionChart').getContext('2d');
+            couponContributionChart = new Chart(ctxContrib, {
+                type: 'pie',
+                data: {
+                    labels: contrib.labels,
+                    datasets: [{ data: contrib.data, backgroundColor: ['#00e5a0', '#3b82f6', '#8b5cf6', '#f97316'] }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+
+        function renderOverviewCharts(revenue, channels) {
+            const ctxRev = document.getElementById('revenueChart').getContext('2d');
+            revenueChart = new Chart(ctxRev, {
+                type: 'line',
+                data: {
+                    labels: revenue.labels,
+                    datasets: [{
+                        label: '일별 매출',
+                        data: revenue.data,
+                        borderColor: '#00e5a0',
+                        backgroundColor: 'rgba(0, 229, 160, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const ctxDonut = document.getElementById('channelDonutChart').getContext('2d');
+            channelDonutChart = new Chart(ctxDonut, {
+                type: 'doughnut',
+                data: {
+                    labels: channels.channels,
+                    datasets: [{
+                        data: channels.revenue,
+                        backgroundColor: ['#00e5a0', '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b'],
+                        borderWidth: 0
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, cutout: '70%' }
+            });
+        }
+
+        function renderAcquisition(channels) {
+            const tbody = document.querySelector('#channelTable tbody');
+            tbody.innerHTML = ''; // Clear table
+            let scatterData = [];
+            channels.channels.forEach((ch, i) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${ch}</td>
+                    <td>${formatKRW(channels.revenue[i])}</td>
+                    <td>${formatNum(channels.orders[i])}</td>
+                    <td>${formatNum(channels.new_customers[i])}</td>
+                    <td>${channels.roas[i] ? channels.roas[i] + '%' : '-'}</td>
+                `;
+                tbody.appendChild(tr);
+
+                if (channels.roas[i]) {
+                    scatterData.push({
+                        x: channels.roas[i],
+                        y: channels.revenue[i],
+                        r: channels.orders[i] / 10 // Bubble size
+                    });
+                }
+            });
+
+            const ctxScatter = document.getElementById('roasScatterChart').getContext('2d');
+            roasScatterChart = new Chart(ctxScatter, {
+                type: 'bubble',
+                data: {
+                    datasets: [{
+                        label: '채널 효율',
+                        data: scatterData,
+                        backgroundColor: 'rgba(59, 130, 246, 0.6)',
+                        borderColor: '#3b82f6'
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        x: { title: { display: true, text: 'ROAS (%)' } },
+                        y: { title: { display: true, text: 'Revenue (KRW)' } }
+                    }
+                }
+            });
+        }
+
+        function renderRetention(customers) {
+            const tbody = document.querySelector('#cohortTable tbody');
+            tbody.innerHTML = ''; // Clear table
+            let trendData = [];
+            customers.cohort.forEach(c => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${c.month}</td>
+                    <td style="background-color: rgba(0,229,160,${c.m0 / 100})">${c.m0}%</td>
+                    <td style="background-color: rgba(0,229,160,${c.m1 / 100})">${c.m1}%</td>
+                    <td style="background-color: rgba(0,229,160,${c.m2 / 100})">${c.m2}%</td>
+                    <td style="background-color: rgba(0,229,160,${c.m3 / 100})">${c.m3}%</td>
+                `;
+                tbody.appendChild(tr);
+                trendData.push((c.m1 + c.m2 + c.m3) / 3); // rough avg
+            });
+
+            const ctxBar = document.getElementById('ltvBarChart').getContext('2d');
+            ltvBarChart = new Chart(ctxBar, {
+                type: 'bar',
+                data: {
+                    labels: customers.ltv_segments,
+                    datasets: [{
+                        label: '고객 수',
+                        data: customers.ltv_data,
+                        backgroundColor: '#8b5cf6'
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const ctxTrend = document.getElementById('retentionTrendChart').getContext('2d');
+            retentionTrendChart = new Chart(ctxTrend, {
+                type: 'line',
+                data: {
+                    labels: customers.cohort.map(c => c.month),
+                    datasets: [{
+                        label: 'Average Retention (M1-M3)',
+                        data: trendData,
+                        borderColor: '#ec4899',
+                        tension: 0.1
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+
+
+        // Run on start
+        loadDashboard();
+    </script>
+</body>
+
+</html>
