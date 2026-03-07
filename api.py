@@ -115,6 +115,65 @@ def fetch_all_orders(params: dict) -> list:
                 _FETCHING_KEYS.remove(cache_key)
 
 
+def fetch_orders_with_items(start_date: str, end_date: str) -> list:
+    """Fetch orders WITH item details using embed=items. Capped at 5000 orders to prevent timeout."""
+    cache_key = f"items_{start_date}_{end_date}"
+    
+    if cache_key in _CACHE:
+        entry = _CACHE[cache_key]
+        if time.time() - entry["time"] < 7200:
+            return entry["data"]
+
+    print(f"[FETCH ITEMS] Fetching orders+items {start_date} ~ {end_date}")
+    all_orders = []
+    offset = 0
+    MAX_ORDERS = 5000  # Cap to prevent browser timeout
+    
+    while True:
+        params = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "embed": "items",
+            "limit": 100,
+            "offset": offset
+        }
+        data = {"orders": []}
+        success = False
+        for attempt in range(3):
+            try:
+                data = client.call_api("orders", params=params)
+                success = True
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    time.sleep(2)
+                elif "422" in str(e):
+                    print(f"[ITEMS] 422 at offset {offset}. Stopping.")
+                    success = True
+                    break
+                else:
+                    print(f"[ITEMS ERROR] {e}")
+                    break
+        
+        batch = data.get("orders", [])
+        all_orders.extend(batch)
+        
+        if not success or len(batch) < 100 or len(all_orders) >= MAX_ORDERS:
+            break
+        offset += 100
+        time.sleep(0.3)  # Reduced from 0.55 for speed
+    
+    with _FETCH_LOCK:
+        _CACHE[cache_key] = {"time": time.time(), "data": all_orders}
+        try:
+            with open(_CACHE_FILE, "w") as f:
+                json.dump(_CACHE, f)
+        except:
+            pass
+    
+    return all_orders
+
+
 def order_revenue(order: dict) -> float:
     """관리자 결제합계 기준 주문 매출.
     = initial_order_amount.payment_amount + naver_point + initial_order_amount.points_spent_amount"""
@@ -683,9 +742,11 @@ def search_products(q: Optional[str] = None):
     """Return a list of unique product names for the search sidebar"""
     if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     try:
-        # Fetch recent products from the last 30 days to keep it fast
-        sd = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        orders = fetch_all_orders({"start_date": sd})
+        # Fetch recent products from the last 30 days with embed=items
+        today = datetime.now()
+        sd = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+        ed = today.strftime("%Y-%m-%d")
+        orders = fetch_orders_with_items(sd, ed)
         
         products = set()
         for o in orders:
@@ -697,7 +758,7 @@ def search_products(q: Optional[str] = None):
         if q:
             plist = [p for p in plist if q.lower() in p.lower()]
             
-        return {"products": [{"name": p} for p in plist[:50]]} # Limit to 50
+        return {"products": [{"name": p} for p in plist[:50]]}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -707,10 +768,11 @@ def get_product_analysis(start_date: Optional[str] = None, end_date: Optional[st
     if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     try:
         today = datetime.now()
-        s = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        s = start_date or (today - timedelta(days=29)).strftime("%Y-%m-%d")
         e = end_date or today.strftime("%Y-%m-%d")
         
-        orders = fetch_all_orders({"start_date": s, "end_date": e})
+        # Use embed=items to get item-level data in a single call
+        orders = fetch_orders_with_items(s, e)
         paid_orders = paid_only(orders)
 
         from collections import defaultdict, Counter
@@ -718,38 +780,55 @@ def get_product_analysis(start_date: Optional[str] = None, end_date: Optional[st
         # Product Metrics
         p_stats = defaultdict(lambda: {"sales": 0, "revenue": 0, "returns": 0, "buyers": set()})
         basket_pairs = Counter() # (Product A, Product B) -> Count
-        
+        basket_order_counts = defaultdict(set)  # product -> set of order_ids (for probability)
+
+        daily_trend = defaultdict(lambda: {"sales": 0, "revenue": 0})
+
         for o in paid_orders:
             cid = o.get('member_id', 'Guest')
             items = o.get('items', [])
-            
+            date_key = (o.get('order_date') or '')[:10]  # "2026-03-01"
+
             # Extract distinct items in this cart for basket analysis
             cart_item_names = sorted(list({item.get('product_name') for item in items if item.get('product_name')}))
-            
+
             # Update metrics per item
             for item in items:
                 pname = item.get('product_name')
                 if not pname: continue
-                
+
                 # If product_name filter is applied, only focus on that
                 if product_name and product_name.lower() not in pname.lower():
                     continue
-                
+
                 qty = int(item.get('quantity', 1))
                 price = float(item.get('product_price', 0))
-                
+
                 p_stats[pname]["sales"] += qty
                 p_stats[pname]["revenue"] += (price * qty)
                 p_stats[pname]["buyers"].add(cid)
-                
+
                 if item.get('order_status') in ('C40', 'C41', 'R40', 'E40'):
                     p_stats[pname]["returns"] += qty
-            
+
+                # Daily trend accumulation
+                if date_key:
+                    daily_trend[date_key]["sales"] += qty
+                    daily_trend[date_key]["revenue"] += price * qty
+
             # Basket combinations (only if no product filter is applied, or if the filter matches one of the items)
             if not product_name or any(product_name.lower() in name.lower() for name in cart_item_names):
+                oid = o.get('order_id', date_key)
+                for name in cart_item_names:
+                    basket_order_counts[name].add(oid)
                 for i in range(len(cart_item_names)):
                     for j in range(i + 1, len(cart_item_names)):
                         basket_pairs[(cart_item_names[i], cart_item_names[j])] += 1
+
+        daily_trend_list = [
+            {"date": d, "sales": v["sales"], "revenue": round(v["revenue"])}
+            for d, v in sorted(daily_trend.items())
+        ]
 
         # Format stats for frontend
         products_list = []
@@ -767,14 +846,36 @@ def get_product_analysis(start_date: Optional[str] = None, end_date: Optional[st
         # Top 10 products by revenue
         top_products = sorted(products_list, key=lambda x: x["revenue"], reverse=True)[:10]
 
-        # Basket Affinity Matrix
+        # Basket Affinity Matrix — global top 15 for Section B
         top_pairs = []
         for (p1, p2), count in basket_pairs.most_common(15):
             top_pairs.append({"p1": p1, "p2": p2, "count": count})
 
+        # Per-product basket (top 500 global pairs → top 5 companions per product)
+        basket_by_product = {}
+        for (p1, p2), count in basket_pairs.most_common(500):
+            for pname, companion in [(p1, p2), (p2, p1)]:
+                if pname not in basket_by_product:
+                    basket_by_product[pname] = []
+                if len(basket_by_product[pname]) < 5:
+                    basket_by_product[pname].append({"companion": companion, "count": count})
+
+        # Product order counts for probability (all products with basket data)
+        product_orders = {
+            pname: len(basket_order_counts.get(pname, set()))
+            for pname in basket_by_product
+        }
+
+        # All products sorted by revenue (for basket dropdown)
+        all_products = [p["name"] for p in sorted(products_list, key=lambda x: -x["revenue"])]
+
         return {
-            "products": top_products, # For table/charts
+            "products": top_products,
             "basket": top_pairs,
+            "basket_by_product": basket_by_product,
+            "all_products": all_products[:200],
+            "product_orders": product_orders,
+            "daily_trend": daily_trend_list,
             "summary": {
                 "total_items": len(products_list),
                 "total_sales": sum(p["sales"] for p in products_list)
