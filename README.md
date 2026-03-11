@@ -27,4 +27,6 @@ The frontend is a single HTML file visualizing the data with Chart.js.
    ```
    and access `http://localhost:8080/dashboard.html`.
 
+   **Note on Localtunnel**: If you are using localtunnel and see a security warning, enter the Bypass IP: **`119.66.176.50`**.
+
    The frontend will automatically redirect you to Cafe24 to authenticate and redirect back upon success.
