@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 orders_cache.json
 node_modules
+# Logs and cache
+*.log
+cache/

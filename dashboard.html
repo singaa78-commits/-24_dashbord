@@ -431,7 +431,7 @@
                 </div>
             </div>
             <div class="chart-card full-width">
-                <div class="chart-title">이탈 위험 고객 목록 (90일 이상 미구매)</div>
+                <div class="chart-title">이탈 위험 고객 목록 (180일 이상 미구매)</div>
                 <table class="data-table" id="churnTable">
                     <thead>
                         <tr>
@@ -525,12 +525,12 @@
         let revenueChart, channelDonutChart, roasScatterChart, ltvBarChart, retentionTrendChart;
         let rfmDonutChart, rfmAovBarChart, productRepurchaseChart, returnRateChart, seasonalTrendChart, holidayChart, couponUsageChart, couponAovChart, couponContributionChart;
 
-        // Set default dates: last 30 days
+        // Set default dates: last 180 days
         const today = new Date();
-        const thirtyDaysAgo = new Date();
-        thirtyDaysAgo.setDate(today.getDate() - 29);
+        const oneHundredEightyDaysAgo = new Date();
+        oneHundredEightyDaysAgo.setDate(today.getDate() - 179);
 
-        document.getElementById('start-date').value = thirtyDaysAgo.toISOString().split('T')[0];
+        document.getElementById('start-date').value = oneHundredEightyDaysAgo.toISOString().split('T')[0];
         document.getElementById('end-date').value = today.toISOString().split('T')[0];
 
         function destroyCharts() {

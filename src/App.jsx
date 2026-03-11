@@ -17,7 +17,7 @@ const TABS = [
 
 function App() {
     const [activeTab, setActiveTab] = useState('overview');
-    const [period, setPeriod] = useState('90');
+    const [period, setPeriod] = useState('180');
     const [customRange, setCustomRange] = useState({
         start: '',
         end: new Date().toISOString().split('T')[0]
@@ -63,7 +63,7 @@ function App() {
 
                     <div className="flex items-center gap-3">
                         <div className="flex items-center bg-slate-100 p-1 rounded-lg">
-                            {['today', '7', '30', '90'].map((p) => (
+                            {['today', '7', '30', '90', '180'].map((p) => (
                                 <button
                                     key={p}
                                     onClick={() => handlePeriodChange(p)}

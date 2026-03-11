@@ -13,25 +13,25 @@ const Products = ({ period, customRange }) => {
     const [dateRange, setDateRange] = useState('');
     const [basketBaseProduct, setBasketBaseProduct] = useState(null);
 
-    // Product tab is capped at 30 days to prevent timeout (embed=items is slow)
+    // Product tab range expansion (allowing up to 180 days)
     const getDates = () => {
         const end = new Date();
         const start = new Date();
         if (period === 'custom' && customRange?.start && customRange?.end) {
-            // Still enforce 30-day cap for custom too
+            // Enforce 180-day cap for custom
             const s = new Date(customRange.start);
             const e = new Date(customRange.end);
             const diff = Math.round((e - s) / 86400000);
-            if (diff <= 30) {
+            if (diff <= 180) {
                 return { start: customRange.start, end: customRange.end };
             }
-            // Clamp to last 30 days of the custom range
+            // Clamp to last 180 days of the custom range
             const capped = new Date(e);
-            capped.setDate(e.getDate() - 30);
+            capped.setDate(e.getDate() - 179);
             return { start: capped.toISOString().split('T')[0], end: customRange.end };
         }
-        // Cap at 30 days regardless of period selector
-        const days = period === 'today' ? 0 : Math.min(parseInt(period) || 30, 30);
+        // Use 180 days as default or requested period (capped at 180)
+        const days = period === 'today' ? 0 : Math.min(parseInt(period) || 179, 179);
         start.setDate(end.getDate() - days);
         const format = (d) => d.toISOString().split('T')[0];
         return { start: format(start), end: format(end) };
@@ -53,7 +53,7 @@ const Products = ({ period, customRange }) => {
 
     useEffect(() => {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s hard timeout
+        const timeoutId = setTimeout(() => controller.abort(), 180000); // 180s hard timeout
 
         const fetchData = async () => {
             setLoading(true);
@@ -104,8 +104,8 @@ const Products = ({ period, customRange }) => {
             <div className="flex flex-col items-center justify-center min-h-[400px]">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mb-4"></div>
                 <p className="text-slate-700 font-bold">상품 데이터를 분석 중입니다...</p>
-                {dateRange && <p className="text-slate-400 text-xs mt-1">조회 기간: {dateRange} (최대 30일)</p>}
-                <p className="text-slate-400 text-xs mt-1">첫 로딩은 20~40초 소요될 수 있습니다.</p>
+                {dateRange && <p className="text-slate-400 text-xs mt-1">조회 기간: {dateRange} (최대 180일)</p>}
+                <p className="text-slate-400 text-xs mt-1">최초 수집 시 약 1~3분이 소요될 수 있습니다. (이후 즉시 로드)</p>
             </div>
         );
     }
@@ -169,8 +169,8 @@ const Products = ({ period, customRange }) => {
                 <div className="flex flex-col items-center justify-center min-h-[400px] bg-white rounded-2xl border border-slate-200">
                     <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mb-4"></div>
                     <p className="text-slate-700 font-bold text-sm">상품 데이터를 분석 중입니다...</p>
-                    {dateRange && <p className="text-slate-400 text-xs mt-1">조회 기간: {dateRange} (최대 30일)</p>}
-                    <p className="text-slate-400 text-xs mt-1">첫 로딩은 20~40초 소요됩니다.</p>
+                    {dateRange && <p className="text-slate-400 text-xs mt-1">조회 기간: {dateRange} (최대 180일)</p>}
+                    <p className="text-slate-400 text-xs mt-1">최초 수집 시 약 1~3분이 소요됩니다. (이후 즉시 로드)</p>
                 </div>
             );
         }

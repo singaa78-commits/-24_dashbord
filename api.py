@@ -12,28 +12,99 @@ import os
 
 import json
 import threading
-import os
+import hashlib
 
 _FETCH_LOCK = threading.Lock()
-_FETCHING_KEYS = set()  # Track which keys are currently being fetched to avoid duplication
+_FETCHING_KEYS = set()
 _CACHE = {}
-_CACHE_FILE = "orders_cache.json"
 
-if os.path.exists(_CACHE_FILE):
+def slim_order(o: dict) -> dict:
+    """분석에 불필요한 필드를 제거하여 캐시 크기 최적화"""
+    ioa = o.get("initial_order_amount") or {}
+    return {
+        "order_id": o.get("order_id"),
+        "order_date": o.get("order_date"),
+        "member_id": o.get("member_id"),
+        "billing_name": o.get("billing_name"),
+        "payment_amount": o.get("payment_amount"),
+        "first_order": o.get("first_order"),
+        "paid": o.get("paid"),
+        "initial_order_amount": {
+            "payment_amount": ioa.get("payment_amount"),
+            "points_spent_amount": ioa.get("points_spent_amount"),
+            "coupon_discount_price": ioa.get("coupon_discount_price")
+        },
+        "items": [
+            {
+                "product_name": i.get("product_name"),
+                "quantity": i.get("quantity"),
+                "product_price": i.get("product_price"),
+                "order_status": i.get("order_status")
+            } for i in o.get("items", [])
+        ] if "items" in o else None
+    }
+
+def get_cache_path(key: str) -> str:
+    import hashlib
+    h = hashlib.md5(key.encode()).hexdigest()
+    return os.path.join("cache", f"{h}.json")
+
+def split_date_range(start_str: str, end_str: str, interval_days: int = 7) -> list:
+    """Cafe24 API 제한 대응: 7일 단위로 분할하여 속도와 안정성 균형 (offset 10000 제한 회피)"""
     try:
-        with open(_CACHE_FILE, "r") as f:
-            _CACHE = json.load(f)
-            print(f"[CACHE] Loaded {len(_CACHE)} cache entries from disk.")
-    except Exception as e:
-        print(f"[CACHE] Failed to load disk cache: {e}")
+        fmt = "%Y-%m-%d"
+        s = datetime.strptime(start_str[:10], fmt)
+        e = datetime.strptime(end_str[:10], fmt)
+    except:
+        return [(start_str, end_str)]
+    
+    ranges = []
+    curr_e = e
+    while curr_e >= s:
+        curr_s = max(s, curr_e - timedelta(days=interval_days - 1))
+        ranges.append((curr_s.strftime(fmt), curr_e.strftime(fmt)))
+        curr_e = curr_s - timedelta(days=1)
+    return ranges
+
+def fetch_all_orders_internal(params: dict) -> list:
+    """Original fetch logic for a single range"""
+    cache_key = json.dumps(params, sort_keys=True)
+    # Cache logic remains here for internal use
+    # ... (Wait, I can just update the main functions to call a private fetcher)
+    pass
 
 def fetch_all_orders(params: dict) -> list:
-    """Cafe24 API는 최대 100건씩 페이지네이션. 전체 주문을 offset으로 모두 가져옴.
-    429 Rate Limit 발생 시 최대 3회 재시도 (2초 대기).
-    15000건 이상의 데이터 요청 시 422 에러 발생 대응."""
+    """90일 분할 조회 지원 버전"""
+    s_date = params.get("start_date")
+    e_date = params.get("end_date")
+    if not s_date or not e_date:
+        return fetch_all_orders_chunk(params)
+    
+    ranges = split_date_range(s_date, e_date)
+    if len(ranges) <= 1:
+        return fetch_all_orders_chunk(params)
+    
+    print(f"[FETCH SPLIT] Range {s_date} ~ {e_date} -> {len(ranges)} chunks", flush=True)
+    all_combined = []
+    seen_oids = set()
+    
+    for rs, re in ranges:
+        print(f"[FETCH SPLIT] Processing chunk {rs} ~ {re}", flush=True)
+        p = {**params, "start_date": rs, "end_date": re}
+        batch = fetch_all_orders_chunk(p)
+        for o in batch:
+            oid = o.get("order_id")
+            if oid not in seen_oids:
+                all_combined.append(o)
+                seen_oids.add(oid)
+    print(f"[FETCH SPLIT] Completed all chunks. Total: {len(all_combined)}", flush=True)
+    return all_combined
+
+def fetch_all_orders_chunk(params: dict) -> list:
+    """분할된 개별 구간에 대한 주문 조회 및 캐싱"""
     cache_key = json.dumps(params, sort_keys=True)
     
-    # Check cache first (Outside lock for read performance)
+    # Check memory cache first
     if cache_key in _CACHE:
         entry = _CACHE[cache_key]
         if time.time() - entry["time"] < 7200:
@@ -42,22 +113,24 @@ def fetch_all_orders(params: dict) -> list:
     # Lock briefly to coordinate fetching
     with _FETCH_LOCK:
         if cache_key in _FETCHING_KEYS:
-            # Another thread is already fetching this. 
-            # In a simple app, we could just wait or retry after sleep.
-            # For now, let's wait a bit and check cache again.
             pass
         else:
             _FETCHING_KEYS.add(cache_key)
 
     try:
-        # If we are here, we might be the first to fetch this key
-        # (Re-check cache inside try just in case someone finished while we were locking)
-        if cache_key in _CACHE:
-            entry = _CACHE[cache_key]
-            if time.time() - entry["time"] < 7200:
-                return entry["data"]
+        # Check local disk cache
+        cache_path = get_cache_path(cache_key)
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r") as f:
+                    entry = json.load(f)
+                    if time.time() - entry["time"] < 7200:
+                        _CACHE[cache_key] = entry
+                        print(f"[CACHE HIT] Loaded from disk: {cache_path}", flush=True)
+                        return entry["data"]
+            except: pass
 
-        print(f"[FETCH START] Fetching orders with params: {params}")
+        print(f"[FETCH START] params: {params}", flush=True)
         all_orders = []
         offset = 0
         per_page = 100
@@ -69,20 +142,19 @@ def fetch_all_orders(params: dict) -> list:
             success = False
             for attempt in range(3):
                 try:
-                    # Added timeout to prevent hanging the whole server
                     data = client.call_api("orders", params=base_params)
                     success = True
                     break
                 except Exception as e:
                     if "429" in str(e) and attempt < 2:
-                        print(f"[RATE LIMIT] Hit rate limit on offset {offset}, retrying...")
-                        time.sleep(2 ** attempt + 1)
+                        print(f"[RATE LIMIT] Hit rate limit on offset {offset}, retrying after 2s...", flush=True)
+                        time.sleep(2.0)
                     elif "422" in str(e):
                         if offset > 0:
-                            print(f"[API LIMIT] Max offset reached at {offset}. Stopping fetch gracefully.")
+                            print(f"[API LIMIT] Max offset reached at {offset} for this 7-day chunk. Stopping fetch.", flush=True)
                             success = True
                         else:
-                            print(f"[API ERROR] 422 Error at offset 0: {e}. Likely invalid params.")
+                            print(f"[API ERROR] 422 at offset 0: {e}. Possible invalid params.", flush=True)
                             error_occurred = True
                         data = {"orders": []}
                         break
@@ -94,19 +166,21 @@ def fetch_all_orders(params: dict) -> list:
             if error_occurred: break
                 
             batch = data.get("orders", [])
-            all_orders.extend(batch)
+            all_orders.extend([slim_order(o) for o in batch])
             
-            if not success or len(batch) < per_page or offset >= 15000:
+            if not success or len(batch) < per_page or offset >= 10000:
                 break
             offset += per_page
-            time.sleep(0.55)
+            print(f"  [PROGRESS] Offset {offset} reached...", flush=True)
+            time.sleep(0.1) 
             
         if not error_occurred:
             with _FETCH_LOCK:
-                _CACHE[cache_key] = {"time": time.time(), "data": all_orders}
+                entry = {"time": time.time(), "data": all_orders}
+                _CACHE[cache_key] = entry
                 try:
-                    with open(_CACHE_FILE, "w") as f:
-                        json.dump(_CACHE, f)
+                    with open(get_cache_path(cache_key), "w") as f:
+                        json.dump(entry, f)
                 except: pass
         return all_orders
     finally:
@@ -116,7 +190,25 @@ def fetch_all_orders(params: dict) -> list:
 
 
 def fetch_orders_with_items(start_date: str, end_date: str) -> list:
-    """Fetch orders WITH item details using embed=items. Capped at 5000 orders to prevent timeout."""
+    """90일 분할 조회 지원 버전 (embed=items)"""
+    ranges = split_date_range(start_date, end_date)
+    if len(ranges) <= 1:
+        return fetch_orders_with_items_chunk(start_date, end_date)
+    
+    print(f"[FETCH ITEMS SPLIT] Splitting into {len(ranges)} chunks.")
+    all_combined = []
+    seen_oids = set()
+    for rs, re in ranges:
+        batch = fetch_orders_with_items_chunk(rs, re)
+        for o in batch:
+            oid = o.get("order_id")
+            if oid not in seen_oids:
+                all_combined.append(o)
+                seen_oids.add(oid)
+    return all_combined
+
+def fetch_orders_with_items_chunk(start_date: str, end_date: str) -> list:
+    """Original fetch logic with embed=items (renamed and improved)"""
     cache_key = f"items_{start_date}_{end_date}"
     
     if cache_key in _CACHE:
@@ -124,20 +216,32 @@ def fetch_orders_with_items(start_date: str, end_date: str) -> list:
         if time.time() - entry["time"] < 7200:
             return entry["data"]
 
-    print(f"[FETCH ITEMS] Fetching orders+items {start_date} ~ {end_date}")
+    # Disk cache check
+    cache_path = get_cache_path(cache_key)
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r") as f:
+                entry = json.load(f)
+                if time.time() - entry["time"] < 7200:
+                    _CACHE[cache_key] = entry
+                    print(f"[CACHE HIT ITEMS] Loaded from disk: {cache_path}", flush=True)
+                    return entry["data"]
+        except: pass
+
+    print(f"[FETCH ITEMS] Fetching orders+items {start_date} ~ {end_date}", flush=True)
     all_orders = []
     offset = 0
-    MAX_ORDERS = 5000  # Cap to prevent browser timeout
+    per_page = 100
+    error_occurred = False
     
     while True:
         params = {
             "start_date": start_date,
             "end_date": end_date,
             "embed": "items",
-            "limit": 100,
+            "limit": per_page,
             "offset": offset
         }
-        data = {"orders": []}
         success = False
         for attempt in range(3):
             try:
@@ -146,31 +250,42 @@ def fetch_orders_with_items(start_date: str, end_date: str) -> list:
                 break
             except Exception as e:
                 if "429" in str(e) and attempt < 2:
-                    time.sleep(2)
+                    print(f"[RATE LIMIT ITEMS] Hit rate limit on offset {offset}, retrying after 3s...", flush=True)
+                    time.sleep(3.0)
                 elif "422" in str(e):
-                    print(f"[ITEMS] 422 at offset {offset}. Stopping.")
-                    success = True
+                    if offset > 0:
+                        print(f"[API LIMIT ITEMS] Max offset reached at {offset}. Stopping fetch.", flush=True)
+                        success = True
+                    else:
+                        print(f"[API ERROR ITEMS] 422 at offset 0: {e}. Possible invalid params.", flush=True)
+                        error_occurred = True
+                    data = {"orders": []}
                     break
                 else:
-                    print(f"[ITEMS ERROR] {e}")
+                    print(f"[ITEMS ERROR] Unexpected error: {e}", flush=True)
+                    error_occurred = True
                     break
         
+        if error_occurred: break
+            
         batch = data.get("orders", [])
-        all_orders.extend(batch)
+        all_orders.extend([slim_order(o) for o in batch])
         
-        if not success or len(batch) < 100 or len(all_orders) >= MAX_ORDERS:
+        if not success or len(batch) < per_page or offset >= 10000:
             break
-        offset += 100
-        time.sleep(0.3)  # Reduced from 0.55 for speed
+        offset += per_page
+        print(f"  [PROGRESS ITEMS] Offset {offset} reached...", flush=True)
+        time.sleep(0.15) # Slightly slower for items to be safe
     
-    with _FETCH_LOCK:
-        _CACHE[cache_key] = {"time": time.time(), "data": all_orders}
-        try:
-            with open(_CACHE_FILE, "w") as f:
-                json.dump(_CACHE, f)
-        except:
-            pass
-    
+    if not error_occurred:
+        with _FETCH_LOCK:
+            entry = {"time": time.time(), "data": all_orders}
+            _CACHE[cache_key] = entry
+            try:
+                with open(cache_path, "w") as f:
+                    json.dump(entry, f)
+            except: pass
+            
     return all_orders
 
 
@@ -451,7 +566,7 @@ def get_overview_data(start_date: Optional[str] = None, end_date: Optional[str] 
         from collections import defaultdict, Counter
         today = datetime.now()
         ed = end_date or today.strftime("%Y-%m-%d")
-        sd = start_date or today.strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
         ref_end = parse_order_date(ed + "T23:59:59+09:00") or today
 
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
@@ -540,7 +655,7 @@ def get_overview_data(start_date: Optional[str] = None, end_date: Optional[str] 
             except: return (d2.replace(tzinfo=None) - d1.replace(tzinfo=None)).days
 
         repurchase_periods = {}
-        for days in [30, 60, 90, 120]:
+        for days in [30, 60, 90, 120, 150, 180]:
             eligible = repurchased = 0
             for mid, dates in cust_dates.items():
                 ds = sorted(dates)
@@ -587,8 +702,9 @@ def get_revenue(start_date: Optional[str] = None, end_date: Optional[str] = None
         return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     
     try:
-        s = start_date or (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")
-        e = end_date or datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now()
+        s = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
+        e = end_date or today.strftime("%Y-%m-%d")
         orders = fetch_all_orders({"start_date": s, "end_date": e})
         paid_orders = paid_only(orders)
 
@@ -616,8 +732,9 @@ def get_customers(start_date: Optional[str] = None, end_date: Optional[str] = No
         return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     
     try:
-        sd = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
-        ed = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now()
+        sd = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
+        ed = end_date or today.strftime("%Y-%m-%d")
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
         paid_orders = paid_only(orders)
 
@@ -705,7 +822,7 @@ def get_rfm(start_date: Optional[str] = None, end_date: Optional[str] = None):
         import bisect
         today = datetime.now()
         ed = end_date or today.strftime("%Y-%m-%d")
-        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
         ref_date = parse_order_date(ed + "T23:59:59+09:00") or today
 
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
@@ -805,13 +922,14 @@ def get_rfm(start_date: Optional[str] = None, end_date: Optional[str] = None):
 
 @app.get("/api/churn")
 def get_churn():
-    """Identify churn risk customers from real data (>90 days since last purchase)"""
+    """Identify churn risk customers from real data (>180 days since last purchase)"""
     if not client.access_token:
         return JSONResponse(status_code=401, content={"error": "Not authenticated"})
 
     try:
-        start_date = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
-        end_date = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now()
+        start_date = (today - timedelta(days=179)).strftime("%Y-%m-%d")
+        end_date = today.strftime("%Y-%m-%d")
         orders = fetch_all_orders({"start_date": start_date, "end_date": end_date})
         paid_orders = paid_only(orders)
 
@@ -830,11 +948,11 @@ def get_churn():
         churners = []
         for cid, info in customer_last.items():
             days = (now - info["date"]).days
-            if days >= 90:
+            if days >= 180:
                 # Derive simple risk rank from days elapsed
-                if days > 270:
+                if days > 540:
                     rank = "Lost"
-                elif days > 180:
+                elif days > 360:
                     rank = "At Risk"
                 else:
                     rank = "Dormant"
@@ -884,7 +1002,7 @@ def get_product_analysis(start_date: Optional[str] = None, end_date: Optional[st
     if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     try:
         today = datetime.now()
-        s = start_date or (today - timedelta(days=29)).strftime("%Y-%m-%d")
+        s = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
         e = end_date or today.strftime("%Y-%m-%d")
         
         # Use embed=items to get item-level data in a single call
@@ -1010,10 +1128,10 @@ def get_seasonal(start_date: Optional[str] = None, end_date: Optional[str] = Non
     """Verifiable seasonal growth based on order history"""
     if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     try:
-        # Use provided dates or default to last 90 days
+        # Use provided dates or default to last 180 days
         today = datetime.now()
         ed = end_date or today.strftime("%Y-%m-%d")
-        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
         
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
         paid_orders = paid_only(orders)
@@ -1061,8 +1179,9 @@ def get_coupons(start_date: Optional[str] = None, end_date: Optional[str] = None
     """Verifiable coupon analysis"""
     if not client.access_token: return JSONResponse(status_code=401, content={"error": "Not authenticated"})
     try:
-        sd = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
-        ed = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now()
+        sd = (today - timedelta(days=179)).strftime("%Y-%m-%d")
+        ed = today.strftime("%Y-%m-%d")
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
         paid_orders = paid_only(orders)
 
@@ -1107,7 +1226,7 @@ def get_cohort(start_date: Optional[str] = None, end_date: Optional[str] = None)
         from collections import defaultdict
         today = datetime.now()
         ed = end_date or today.strftime("%Y-%m-%d")
-        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
 
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
         paid = paid_only(orders)
@@ -1192,7 +1311,7 @@ def get_purchase_pattern(start_date: Optional[str] = None, end_date: Optional[st
         from collections import defaultdict
         today = datetime.now()
         ed = end_date or today.strftime("%Y-%m-%d")
-        sd = start_date or (today - timedelta(days=89)).strftime("%Y-%m-%d")
+        sd = start_date or (today - timedelta(days=179)).strftime("%Y-%m-%d")
 
         orders = fetch_all_orders({"start_date": sd, "end_date": ed})
         paid = paid_only(orders)
@@ -1238,7 +1357,9 @@ def get_purchase_pattern(start_date: Optional[str] = None, end_date: Optional[st
             {"label": "1개월",     "min": 15, "max": 30,  "count": 0},
             {"label": "2개월",     "min": 31, "max": 60,  "count": 0},
             {"label": "3개월",     "min": 61, "max": 90,  "count": 0},
-            {"label": "91일+",     "min": 91, "max": 9999,"count": 0},
+            {"label": "4개월",     "min": 91, "max": 120, "count": 0},
+            {"label": "5개월",     "min": 121, "max": 150, "count": 0},
+            {"label": "6개월+",     "min": 151, "max": 9999,"count": 0},
         ]
         interval_days = []
         for dates in cust_dates.values():
